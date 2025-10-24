@@ -343,6 +343,30 @@ pub struct BladeRenderer {
     rendering_parameters: RenderingParameters,
 }
 
+pub trait GPUIRenderer {
+    fn update_drawable_size(&mut self, size: Size<DevicePixels>);
+    #[cfg_attr(
+        any(target_os = "macos", target_os = "linux", target_os = "freebsd"),
+        allow(dead_code)
+    )]
+    fn update_drawable_size_even_if_unchanged(&mut self, size: Size<DevicePixels>);
+    fn update_transparency(&mut self, transparent: bool);
+    #[cfg_attr(
+        any(target_os = "macos", feature = "wayland", target_os = "windows"),
+        allow(dead_code)
+    )]
+    fn viewport_size(&self) -> gpu::Extent;
+    fn sprite_atlas(&self) -> &Arc<BladeAtlas>;
+    #[cfg_attr(target_os = "macos", allow(dead_code))]
+    fn gpu_specs(&self) -> GpuSpecs;
+    #[cfg(target_os = "macos")]
+    fn layer(&self) -> metal::MetalLayer;
+    #[cfg(target_os = "macos")]
+    fn layer_ptr(&self) -> *mut metal::CAMetalLayer;
+    fn destroy(&mut self);
+    fn draw(&mut self, scene: &Scene);
+}
+
 impl BladeRenderer {
     pub fn new<I: raw_window_handle::HasWindowHandle + raw_window_handle::HasDisplayHandle>(
         context: &BladeContext,
@@ -452,21 +476,6 @@ impl BladeRenderer {
         }
     }
 
-    pub fn update_drawable_size(&mut self, size: Size<DevicePixels>) {
-        self.update_drawable_size_impl(size, false);
-    }
-
-    /// Like `update_drawable_size` but skips the check that the size has changed. This is useful in
-    /// cases like restoring a window from minimization where the size is the same but the
-    /// renderer's swap chain needs to be recreated.
-    #[cfg_attr(
-        any(target_os = "macos", target_os = "linux", target_os = "freebsd"),
-        allow(dead_code)
-    )]
-    pub fn update_drawable_size_even_if_unchanged(&mut self, size: Size<DevicePixels>) {
-        self.update_drawable_size_impl(size, true);
-    }
-
     fn update_drawable_size_impl(&mut self, size: Size<DevicePixels>, always_resize: bool) {
         let gpu_size = gpu::Extent {
             width: size.width.0 as u32,
@@ -509,55 +518,6 @@ impl BladeRenderer {
             self.path_intermediate_msaa_texture = path_intermediate_msaa_texture;
             self.path_intermediate_msaa_texture_view = path_intermediate_msaa_texture_view;
         }
-    }
-
-    pub fn update_transparency(&mut self, transparent: bool) {
-        if transparent != self.surface_config.transparent {
-            self.wait_for_gpu();
-            self.surface_config.transparent = transparent;
-            self.gpu
-                .reconfigure_surface(&mut self.surface, self.surface_config);
-            self.pipelines.destroy(&self.gpu);
-            self.pipelines = BladePipelines::new(
-                &self.gpu,
-                self.surface.info(),
-                self.rendering_parameters.path_sample_count,
-            );
-        }
-    }
-
-    #[cfg_attr(
-        any(target_os = "macos", feature = "wayland", target_os = "windows"),
-        allow(dead_code)
-    )]
-    pub fn viewport_size(&self) -> gpu::Extent {
-        self.surface_config.size
-    }
-
-    pub fn sprite_atlas(&self) -> &Arc<BladeAtlas> {
-        &self.atlas
-    }
-
-    #[cfg_attr(target_os = "macos", allow(dead_code))]
-    pub fn gpu_specs(&self) -> GpuSpecs {
-        let info = self.gpu.device_information();
-
-        GpuSpecs {
-            is_software_emulated: info.is_software_emulated,
-            device_name: info.device_name.clone(),
-            driver_name: info.driver_name.clone(),
-            driver_info: info.driver_info.clone(),
-        }
-    }
-
-    #[cfg(target_os = "macos")]
-    pub fn layer(&self) -> metal::MetalLayer {
-        unsafe { foreign_types::ForeignType::from_ptr(self.layer_ptr()) }
-    }
-
-    #[cfg(target_os = "macos")]
-    pub fn layer_ptr(&self) -> *mut metal::CAMetalLayer {
-        objc2::rc::Retained::as_ptr(&self.surface.metal_layer()) as *mut _
     }
 
     #[profiling::function]
@@ -620,8 +580,74 @@ impl BladeRenderer {
             encoder.draw(0, vertices.len() as u32, 0, 1);
         }
     }
+}
 
-    pub fn destroy(&mut self) {
+impl GPUIRenderer for BladeRenderer {
+    fn update_drawable_size(&mut self, size: Size<DevicePixels>) {
+        self.update_drawable_size_impl(size, false);
+    }
+
+    /// Like `update_drawable_size` but skips the check that the size has changed. This is useful in
+    /// cases like restoring a window from minimization where the size is the same but the
+    /// renderer's swap chain needs to be recreated.
+    #[cfg_attr(
+        any(target_os = "macos", target_os = "linux", target_os = "freebsd"),
+        allow(dead_code)
+    )]
+    fn update_drawable_size_even_if_unchanged(&mut self, size: Size<DevicePixels>) {
+        self.update_drawable_size_impl(size, true);
+    }
+
+    fn update_transparency(&mut self, transparent: bool) {
+        if transparent != self.surface_config.transparent {
+            self.wait_for_gpu();
+            self.surface_config.transparent = transparent;
+            self.gpu
+                .reconfigure_surface(&mut self.surface, self.surface_config);
+            self.pipelines.destroy(&self.gpu);
+            self.pipelines = BladePipelines::new(
+                &self.gpu,
+                self.surface.info(),
+                self.rendering_parameters.path_sample_count,
+            );
+        }
+    }
+
+    #[cfg_attr(
+        any(target_os = "macos", feature = "wayland", target_os = "windows"),
+        allow(dead_code)
+    )]
+    fn viewport_size(&self) -> gpu::Extent {
+        self.surface_config.size
+    }
+
+    fn sprite_atlas(&self) -> &Arc<BladeAtlas> {
+        &self.atlas
+    }
+
+    #[cfg_attr(target_os = "macos", allow(dead_code))]
+    fn gpu_specs(&self) -> GpuSpecs {
+        let info = self.gpu.device_information();
+
+        GpuSpecs {
+            is_software_emulated: info.is_software_emulated,
+            device_name: info.device_name.clone(),
+            driver_name: info.driver_name.clone(),
+            driver_info: info.driver_info.clone(),
+        }
+    }
+
+    #[cfg(target_os = "macos")]
+    fn layer(&self) -> metal::MetalLayer {
+        unsafe { foreign_types::ForeignType::from_ptr(self.layer_ptr()) }
+    }
+
+    #[cfg(target_os = "macos")]
+    fn layer_ptr(&self) -> *mut metal::CAMetalLayer {
+        objc2::rc::Retained::as_ptr(&self.surface.metal_layer()) as *mut _
+    }
+
+    fn destroy(&mut self) {
         self.wait_for_gpu();
         self.atlas.destroy();
         self.gpu.destroy_sampler(self.atlas_sampler);
@@ -640,7 +666,7 @@ impl BladeRenderer {
         }
     }
 
-    pub fn draw(&mut self, scene: &Scene) {
+    fn draw(&mut self, scene: &Scene) {
         self.command_encoder.start();
         self.atlas.before_frame(&mut self.command_encoder);
 

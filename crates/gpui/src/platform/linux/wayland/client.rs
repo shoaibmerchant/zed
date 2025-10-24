@@ -3,6 +3,7 @@ use std::{
     hash::Hash,
     os::fd::{AsRawFd, BorrowedFd},
     path::PathBuf,
+    ptr::NonNull,
     rc::{Rc, Weak},
     time::{Duration, Instant},
 };
@@ -15,7 +16,9 @@ use calloop::{
 use calloop_wayland_source::WaylandSource;
 use collections::HashMap;
 use filedescriptor::Pipe;
+use glutin::api::egl;
 use http_client::Url;
+use raw_window_handle::{RawDisplayHandle, WaylandDisplayHandle};
 use smallvec::SmallVec;
 use util::ResultExt;
 use wayland_backend::client::ObjectId;
@@ -70,7 +73,7 @@ use super::{
     window::{ImeInput, WaylandWindowStatePtr},
 };
 
-use crate::platform::{PlatformWindow, blade::BladeContext};
+use crate::platform::{PlatformWindow, blade::BladeContext, linux::wayland::gl::create_gl_display};
 use crate::{
     AnyWindowHandle, Bounds, Capslock, CursorStyle, DOUBLE_CLICK_INTERVAL, DevicePixels, DisplayId,
     FileDropEvent, ForegroundExecutor, KeyDownEvent, KeyUpEvent, Keystroke, LinuxCommon,
@@ -194,6 +197,7 @@ pub(crate) struct WaylandClientState {
     serial_tracker: SerialTracker,
     globals: Globals,
     gpu_context: BladeContext,
+    gl_display: egl::display::Display,
     wl_seat: wl_seat::WlSeat, // TODO: Multi seat support
     wl_pointer: Option<wl_pointer::WlPointer>,
     wl_keyboard: Option<wl_keyboard::WlKeyboard>,
@@ -447,6 +451,7 @@ fn wl_output_version(version: u32) -> u32 {
 impl WaylandClient {
     pub(crate) fn new() -> Self {
         let conn = Connection::connect_to_env().unwrap();
+        let wl_display = conn.display();
 
         let (globals, mut event_queue) =
             registry_queue_init::<WaylandClientStatePtr>(&conn).unwrap();
@@ -498,6 +503,12 @@ impl WaylandClient {
             })
             .unwrap();
 
+        let display_handle = RawDisplayHandle::Wayland(WaylandDisplayHandle::new(
+            NonNull::new(wl_display.id().as_ptr() as *mut _)
+                .expect("Wayland display pointer is null"),
+        ));
+
+        let gl_display = create_gl_display(display_handle);
         let gpu_context = BladeContext::new().expect("Unable to init GPU context");
 
         let seat = seat.unwrap();
@@ -554,6 +565,7 @@ impl WaylandClient {
             serial_tracker: SerialTracker::new(),
             globals,
             gpu_context,
+            gl_display,
             wl_seat: seat,
             wl_pointer: None,
             wl_keyboard: None,
@@ -701,6 +713,7 @@ impl LinuxClient for WaylandClient {
             handle,
             state.globals.clone(),
             &state.gpu_context,
+            &state.gl_display,
             WaylandClientStatePtr(Rc::downgrade(&self.0)),
             params,
             state.common.appearance,

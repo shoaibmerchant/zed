@@ -14,7 +14,7 @@ impl Default for Context {
     }
 }
 
-pub type Renderer = BladeRenderer;
+pub type Renderer = dyn GPUIRenderer;
 
 pub unsafe fn new_renderer(
     context: Context,

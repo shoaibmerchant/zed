@@ -135,6 +135,9 @@ waker-fn = "1.2.0"
 lyon = "1.0"
 libc.workspace = true
 pin-project = "1.1.10"
+impellers = { path = "../../../impellers", features = ["prebuilt_libs"] }
+glow = "0.16"
+glutin = "0.32.3"
 
 [target.'cfg(target_os = "macos")'.dependencies]
 block = "0.1"

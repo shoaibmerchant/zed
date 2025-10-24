@@ -1,6 +1,6 @@
 use std::{
     cell::{Ref, RefCell, RefMut},
-    ffi::c_void,
+    ffi::{CString, c_void},
     ptr::NonNull,
     rc::Rc,
     sync::Arc,
@@ -10,7 +10,12 @@ use blade_graphics as gpu;
 use collections::HashMap;
 use futures::channel::oneshot::Receiver;
 
-use raw_window_handle as rwh;
+use glutin::{
+    api::egl,
+    display::GetGlDisplay,
+    prelude::{GlDisplay, NotCurrentGlContext},
+};
+use raw_window_handle::{self as rwh, RawWindowHandle, WaylandWindowHandle};
 use wayland_backend::client::ObjectId;
 use wayland_client::WEnum;
 use wayland_client::{Proxy, protocol::wl_surface};
@@ -28,13 +33,18 @@ use crate::{
     AnyWindowHandle, Bounds, Decorations, Globals, GpuSpecs, Modifiers, Output, Pixels,
     PlatformDisplay, PlatformInput, Point, PromptButton, PromptLevel, RequestFrameOptions,
     ResizeEdge, Size, Tiling, WaylandClientStatePtr, WindowAppearance, WindowBackgroundAppearance,
-    WindowBounds, WindowControlArea, WindowControls, WindowDecorations, WindowParams, px, size,
+    WindowBounds, WindowControlArea, WindowControls, WindowDecorations, WindowParams,
+    platform::{
+        blade::{GPUIRenderer, ImpellerConfig, ImpellerRenderer},
+        linux::wayland::gl::{create_gl_context, get_gl_config},
+    },
+    px, size,
 };
 use crate::{
     Capslock,
     platform::{
         PlatformAtlas, PlatformInputHandler, PlatformWindow,
-        blade::{BladeContext, BladeRenderer, BladeSurfaceConfig},
+        blade::{BladeContext, BladeSurfaceConfig},
         linux::wayland::{display::WaylandDisplay, serial::SerialKind},
     },
 };
@@ -95,7 +105,7 @@ pub struct WaylandWindowState {
     outputs: HashMap<ObjectId, Output>,
     display: Option<(ObjectId, Output)>,
     globals: Globals,
-    renderer: BladeRenderer,
+    renderer: Box<dyn GPUIRenderer>,
     bounds: Bounds<Pixels>,
     scale: f32,
     input_handler: Option<PlatformInputHandler>,
@@ -134,6 +144,7 @@ impl WaylandWindowState {
         client: WaylandClientStatePtr,
         globals: Globals,
         gpu_context: &BladeContext,
+        gl_display: &egl::display::Display,
         options: WindowParams,
     ) -> anyhow::Result<Self> {
         let renderer = {
@@ -146,15 +157,56 @@ impl WaylandWindowState {
                     .display_ptr()
                     .cast::<c_void>(),
             };
-            let config = BladeSurfaceConfig {
-                size: gpu::Extent {
-                    width: options.bounds.size.width.0 as u32,
-                    height: options.bounds.size.height.0 as u32,
-                    depth: 1,
-                },
-                transparent: true,
+            let (width, height) = (
+                options.bounds.size.width.0 as u32,
+                options.bounds.size.height.0 as u32,
+            );
+
+            let gl_config = get_gl_config(gl_display);
+            let window_handle = RawWindowHandle::Wayland(WaylandWindowHandle::new(
+                NonNull::new(raw_window.window).unwrap(),
+            ));
+            let (gl_context, gl_surface) =
+                create_gl_context(window_handle, (width, height), &gl_config);
+            let gl_display_context = gl_context.display();
+            // let active_context = gl_context.make_current().unwrap();
+
+            let mut impeller_context: impellers::Context = unsafe {
+                impellers::Context::new_opengl_es(|s| {
+                    gl_display_context.get_proc_address(CString::new(s).unwrap().as_c_str()) as _
+                })
+            }
+            .unwrap();
+
+            let glow_context: glow::Context = unsafe {
+                glow::Context::from_loader_function(|s| {
+                    gl_display_context.get_proc_address(CString::new(s).unwrap().as_c_str()) as _
+                }) as _
             };
-            BladeRenderer::new(gpu_context, &raw_window, config)?
+
+            let config = ImpellerConfig {
+                width: options.bounds.size.width.0 as u32,
+                height: options.bounds.size.height.0 as u32,
+            };
+
+            // let config = BladeSurfaceConfig {
+            //     size: gpu::Extent {
+            //         width: options.bounds.size.width.0 as u32,
+            //         height: options.bounds.size.height.0 as u32,
+            //         depth: 1,
+            //     },
+            //     transparent: true,
+            // };
+
+            // BladeRenderer::new(gpu_context, &raw_window, config)?
+            ImpellerRenderer::new(
+                config,
+                gpu_context,
+                impeller_context,
+                glow_context,
+                gl_context,
+                gl_surface,
+            )?
         };
 
         Ok(Self {
@@ -169,7 +221,7 @@ impl WaylandWindowState {
             globals,
             outputs: HashMap::default(),
             display: None,
-            renderer,
+            renderer: Box::new(renderer),
             bounds: options.bounds,
             scale: 1.0,
             input_handler: None,
@@ -276,6 +328,7 @@ impl WaylandWindow {
         handle: AnyWindowHandle,
         globals: Globals,
         gpu_context: &BladeContext,
+        gl_display: &egl::display::Display,
         client: WaylandClientStatePtr,
         params: WindowParams,
         appearance: WindowAppearance,
@@ -324,6 +377,7 @@ impl WaylandWindow {
                 client,
                 globals,
                 gpu_context,
+                gl_display,
                 params,
             )?)),
             callbacks: Rc::new(RefCell::new(Callbacks::default())),

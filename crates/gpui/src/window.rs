@@ -2006,6 +2006,7 @@ impl Window {
     #[profiling::function]
     fn present(&self) {
         self.platform_window.draw(&self.rendered_frame.scene);
+        println!("present()");
         self.needs_present.set(false);
         profiling::finish_frame!();
     }
