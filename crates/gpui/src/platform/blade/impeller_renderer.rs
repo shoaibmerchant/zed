@@ -1,13 +1,15 @@
-use std::sync::Arc;
-
 use glow::HasContext;
 use glutin::{
     api::egl::{self, context::PossiblyCurrentContext},
     surface::{GlSurface, WindowSurface},
 };
 use impellers::{Color, DisplayListBuilder, ISize, Paint, PixelFormat, Point, Rect, Size};
+use std::sync::Arc;
 
-use crate::platform::blade::{BladeAtlas, BladeContext, GPUIRenderer};
+use crate::{
+    Background, Hsla, PrimitiveBatch, hsla,
+    platform::blade::{BladeAtlas, BladeContext, GPUIRenderer},
+};
 
 pub struct ImpellerConfig {
     pub height: u32,
@@ -90,6 +92,20 @@ impl GPUIRenderer for ImpellerRenderer {
         let ImpellerConfig { height, width } = self.config;
         println!("impeller dimensions {} {}", width, height);
 
+        // let dl = {
+        //     let mut builder = DisplayListBuilder::new(None);
+        //     let mut paint = Paint::default();
+        //     paint.set_color(Color::BLACK);
+        //     // clear with black first
+        //     builder.draw_paint(&paint);
+        //     paint.set_color(Color::AIR_FORCE_BLUE);
+        //     builder.draw_rect(
+        //         &Rect::new(Point::new(100.0, 100.0), Size::new(250.0, 250.0)),
+        //         &paint,
+        //     );
+        //     builder.build().unwrap()
+        // };
+
         let mut surface = unsafe {
             impeller_context.wrap_fbo(
                 0,
@@ -99,28 +115,66 @@ impl GPUIRenderer for ImpellerRenderer {
         }
         .expect("failed to wrap window's framebuffer");
 
-        let dl = {
-            let mut builder = DisplayListBuilder::new(None);
-            let mut paint = Paint::default();
-            paint.set_color(Color::BLACK);
-            // clear with black first
-            builder.draw_paint(&paint);
-            paint.set_color(Color::AIR_FORCE_BLUE);
-            builder.draw_rect(
-                &Rect::new(Point::new(100.0, 100.0), Size::new(250.0, 250.0)),
-                &paint,
-            );
-            builder.build().unwrap()
-        };
+        let mut dl_builder = DisplayListBuilder::new(None);
+        let mut paint = Paint::default();
+        paint.set_color(Color::BLACK);
+        // clear with black first
+        dl_builder.draw_paint(&paint);
 
-        unsafe {
-            glow_context.clear_color(1.0, 0.0, 0.0, 1.0);
-            glow_context.clear(glow::COLOR_BUFFER_BIT);
+        for batch in scene.batches() {
+            match batch {
+                PrimitiveBatch::Quads(quads) => {
+                    let mut q_surface = unsafe {
+                        impeller_context.wrap_fbo(
+                            0,
+                            PixelFormat::RGBA8888,
+                            ISize::new(width.into(), height.into()),
+                        )
+                    }
+                    .expect("failed to wrap window's framebuffer");
+
+                    for q in quads.iter() {
+                        println!(
+                            "drawing q {:?} {:?} {:?}",
+                            q.order, q.bounds.origin, q.bounds.size
+                        );
+                        let origin = q.bounds.origin;
+                        let size = q.bounds.size;
+                        let hsl_color = q.background.solid;
+
+                        // Convert to RGBA
+                        let rgba_color = hsl_color.to_rgb();
+                        let color = Color::new_srgba(
+                            rgba_color.r,
+                            rgba_color.g,
+                            rgba_color.b,
+                            rgba_color.a,
+                        );
+
+                        paint.set_color(color);
+
+                        dl_builder.draw_rect(
+                            &Rect::new(
+                                Point::new(origin.x.0, origin.y.0),
+                                Size::new(size.width.0, size.height.0),
+                            ),
+                            &paint,
+                        );
+                    }
+                }
+                PrimitiveBatch::Paths(paths) => {}
+                _ => {}
+            }
         }
-
+        let dl = dl_builder.build().unwrap();
         surface
             .draw_display_list(&dl)
             .expect("failed to draw on surface");
+
+        // unsafe {
+        //     glow_context.clear_color(1.0, 0.0, 0.0, 1.0);
+        //     glow_context.clear(glow::COLOR_BUFFER_BIT);
+        // }
 
         gl_surface
             .swap_buffers(&gl_context)
